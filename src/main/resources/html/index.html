@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>YOLO PDF → Crops Viewer</title>
+    <style>
+        body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; margin: 20px; color:#111; }
+        h1 { margin: 0 0 12px 0; font-size: 20px; }
+        .uploader { border: 1px dashed #ccc; padding: 18px; border-radius: 8px; display:flex; gap:12px; align-items:center; }
+        .file-info { font-size: 14px; color:#444; }
+        button { background:#2563eb; color:white; border:none; padding:8px 12px; border-radius:6px; cursor:pointer; }
+        button:disabled { opacity:0.5; cursor:not-allowed; }
+        .progress { margin-top:12px; }
+        .pages { margin-top: 18px; display:flex; flex-direction:column; gap:18px; }
+        .page { border-radius:8px; padding:12px; background:#fafafa; border:1px solid #eee; }
+        .page h2 { margin:0 0 8px 0; font-size:16px; }
+        .crops { display:flex; gap:8px; flex-wrap:wrap; }
+        .crop { border:1px solid #ddd; padding:6px; background:white; border-radius:6px; display:flex; flex-direction:column; gap:6px; }
+        .crop img { display:block; max-width:200px; max-height:200px; object-fit:contain; }
+        .small { font-size:12px; color:#666; }
+        .error { color: #b00020; margin-top:12px; }
+        footer { margin-top:24px; font-size:12px; color:#666; }
+    </style>
+</head>
+<body>
+<h1>PDF → YOLO Crops Viewer</h1>
+
+<div class="uploader">
+    <input id="pdfInput" type="file" accept="application/pdf" />
+    <div style="display:flex;flex-direction:column;">
+        <div style="display:flex;gap:8px;">
+            <button id="uploadBtn">Upload & Detect</button>
+            <button id="clearBtn" type="button">Clear</button>
+        </div>
+        <div class="file-info" id="fileInfo">No file chosen</div>
+    </div>
+</div>
+
+<div class="progress" id="progress" style="display:none;">
+    <span id="progressText">Uploading...</span>
+</div>
+
+<div class="error" id="error" style="display:none;"></div>
+
+<div class="pages" id="pages"></div>
+
+<footer>
+    Endpoint: <code id="endpoint">http://localhost:8081/detect</code>
+    &nbsp;·&nbsp; Make sure your backend allows CORS or serve this page from the same origin.
+</footer>
+
+<script>
+    (() => {
+        const pdfInput = document.getElementById('pdfInput');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const fileInfo = document.getElementById('fileInfo');
+        const progress = document.getElementById('progress');
+        const progressText = document.getElementById('progressText');
+        const pagesEl = document.getElementById('pages');
+        const errorEl = document.getElementById('error');
+        const endpointEl = document.getElementById('endpoint');
+
+        // Set endpoint here if you need a different one
+        const ENDPOINT = 'http://localhost:8081/detect'; // <-- change if needed
+        endpointEl.textContent = ENDPOINT;
+
+        let selectedFile = null;
+
+        pdfInput.addEventListener('change', (e) => {
+            selectedFile = e.target.files && e.target.files[0] ? e.target.files[0] : null;
+            fileInfo.textContent = selectedFile ? `${selectedFile.name} (${Math.round(selectedFile.size/1024)} KB)` : 'No file chosen';
+            errorEl.style.display = 'none';
+        });
+
+        clearBtn.addEventListener('click', () => {
+            pdfInput.value = '';
+            selectedFile = null;
+            fileInfo.textContent = 'No file chosen';
+            pagesEl.innerHTML = '';
+            errorEl.style.display = 'none';
+        });
+
+        uploadBtn.addEventListener('click', async () => {
+            errorEl.style.display = 'none';
+            pagesEl.innerHTML = '';
+
+            if (!selectedFile) {
+                errorEl.textContent = 'Please select a PDF file first.';
+                errorEl.style.display = 'block';
+                return;
+            }
+
+            const fd = new FormData();
+            fd.append('file', selectedFile);
+
+            uploadBtn.disabled = true;
+            progress.style.display = 'block';
+            progressText.textContent = 'Uploading and waiting for detection...';
+
+            try {
+                const resp = await fetch(ENDPOINT, {
+                    method: 'POST',
+                    body: fd
+                });
+
+                if (!resp.ok) {
+                    const text = await resp.text();
+                    throw new Error(`Server returned ${resp.status}: ${text}`);
+                }
+
+                // Try to parse JSON
+                const data = await resp.json();
+
+                // Expect: { status: 'success', detections: { 'page_1.png': ['base64...','...'], ... } }
+                if (!data || !data.detections) {
+                    throw new Error('Unexpected response format. Expected JSON with "detections" field.');
+                }
+
+                renderDetections(data.detections);
+                progress.style.display = 'none';
+            } catch (err) {
+                console.error(err);
+                errorEl.textContent = 'Error: ' + (err.message || err);
+                errorEl.style.display = 'block';
+                progress.style.display = 'none';
+            } finally {
+                uploadBtn.disabled = false;
+            }
+        });
+
+        function renderDetections(detections) {
+            pagesEl.innerHTML = '';
+            const entries = Object.entries(detections);
+
+            if (entries.length === 0) {
+                pagesEl.textContent = 'No pages / detections returned.';
+                return;
+            }
+
+            // Sort by page filename if possible (page_1.png, page_2.png)
+            entries.sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+            for (const [pageName, crops] of entries) {
+                const pageDiv = document.createElement('div');
+                pageDiv.className = 'page';
+
+                const title = document.createElement('h2');
+                title.textContent = pageName;
+                pageDiv.appendChild(title);
+
+                const small = document.createElement('div');
+                small.className = 'small';
+                small.textContent = `${Array.isArray(crops) ? crops.length : 0} crops`;
+                pageDiv.appendChild(small);
+
+                const cropsWrap = document.createElement('div');
+                cropsWrap.className = 'crops';
+
+                if (!Array.isArray(crops) || crops.length === 0) {
+                    const none = document.createElement('div');
+                    none.className = 'small';
+                    none.textContent = 'No detections on this page.';
+                    pageDiv.appendChild(none);
+                } else {
+                    for (let i = 0; i < crops.length; i++) {
+                        const base64 = crops[i];
+                        // Accept either raw base64 (PNG) or data URI already included.
+                        const src = base64.startsWith('data:') ? base64 : `data:image/png;base64,${base64}`;
+
+                        const cropDiv = document.createElement('div');
+                        cropDiv.className = 'crop';
+                        const img = document.createElement('img');
+                        img.src = src;
+                        img.alt = `crop ${i+1}`;
+                        cropDiv.appendChild(img);
+
+                        const label = document.createElement('div');
+                        label.className = 'small';
+                        label.textContent = `crop ${i+1}`;
+                        cropDiv.appendChild(label);
+
+                        // download button
+                        const download = document.createElement('button');
+                        download.textContent = 'Download';
+                        download.style.padding = '6px';
+                        download.style.fontSize = '12px';
+                        download.addEventListener('click', () => downloadBase64Image(src, `${pageName}_crop_${i+1}.png`));
+                        cropDiv.appendChild(download);
+
+                        cropsWrap.appendChild(cropDiv);
+                    }
+                }
+
+                pageDiv.appendChild(cropsWrap);
+                pagesEl.appendChild(pageDiv);
+            }
+        }
+
+        function downloadBase64Image(dataUrl, filename) {
+            const a = document.createElement('a');
+            a.href = dataUrl;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+        }
+    })();
+</script>
+</body>
+</html>
